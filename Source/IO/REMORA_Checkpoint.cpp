@@ -123,6 +123,13 @@ REMORA::WriteCheckpointFile ()
        }
        HeaderFile << "\n";
 
+       // Which ice model was running, so that a restart with the ice switched on
+       // from a run without it starts the ice from the ice-free state.
+       if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+           HeaderFile << "sea_ice_model "
+                      << REMORASeaIce::sea_ice_model_name(sea_ice_model) << "\n";
+       }
+
        // History record for this step: the one just written if output came at
        // this step, otherwise the next. A restart numbers records and chunk
        // files on from it.
@@ -256,6 +263,13 @@ REMORA::WriteCheckpointFile ()
        VisMF::Write(*(vec_Akp[lev]), amrex::MultiFabFileFullPrefix(lev, checkpointname, "Level_", "Akp"));
        VisMF::Write(*(vec_Akv[lev]), amrex::MultiFabFileFullPrefix(lev, checkpointname, "Level_", "Akv"));
        VisMF::Write(*(vec_Akt[lev]), amrex::MultiFabFileFullPrefix(lev, checkpointname, "Level_", "Akt"));
+
+       // The sea ice. The write and the read share one field list,
+       // ice_checkpoint_fields, so they cannot drift apart.
+       for (auto& [name, mf] : ice_checkpoint_fields(lev)) {
+           VisMF::Write(*mf, amrex::MultiFabFileFullPrefix(lev, checkpointname,
+                                                           "Level_", name));
+       }
 
        // The end-of-step snapshots a subcycled finer level interpolates between (see
        // roll_2d_snapshot and store_2d_flux). Each step rolls the previous step's into the
@@ -426,6 +440,7 @@ REMORA::ReadCheckpointFile ()
     //       these carry the start_time and t_new it was summed from;
     //   start_time alone: the time line is t_new, elapsed since that origin;
     //   neither: the time line is on the model clock.
+    std::string chk_ice_model = "none";
     bool have_time_origin = false;
     bool have_start_time = false;
     bool rhs_per_area = true;
@@ -456,6 +471,10 @@ REMORA::ReadCheckpointFile ()
         } else if (word == "history_count") {
             // History record for this step. Without it, history output starts over.
             lis >> history_count;
+        } else if (word == "sea_ice_model") {
+            // Which ice model wrote this checkpoint. Absent from a checkpoint
+            // written without sea ice.
+            lis >> chk_ice_model;
         } else if (word == "cons_names") {
             // Same count, checked above, is not the same layout: the data are
             // stored by position. Older checkpoints lack this line.
@@ -633,6 +652,24 @@ REMORA::ReadCheckpointFile ()
        VisMF::Read(*(vec_Akp[lev]), amrex::MultiFabFileFullPrefix(lev, restart_chkfile, "Level_", "Akp"));
        VisMF::Read(*(vec_Akt[lev]), amrex::MultiFabFileFullPrefix(lev, restart_chkfile, "Level_", "Akt"));
        VisMF::Read(*(vec_Akv[lev]), amrex::MultiFabFileFullPrefix(lev, restart_chkfile, "Level_", "Akv"));
+
+       // The sea ice, from the same field list the write used. A checkpoint from a run
+       // without ice starts ice-free, in place of the initial state this run's inputs give.
+       if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+           if (chk_ice_model == "none") {
+               for (auto& [name, mf] : ice_checkpoint_fields(lev)) { mf->setVal(Real(0.0)); }
+               if (lev == 0) {
+                   amrex::Print() << "Sea ice: " << restart_chkfile
+                       << " was written without sea ice, so the ice starts ice-free"
+                          " from this restart while the ocean continues.\n";
+               }
+           } else {
+               for (auto& [name, mf] : ice_checkpoint_fields(lev)) {
+                   VisMF::Read(*mf, amrex::MultiFabFileFullPrefix(lev, restart_chkfile,
+                                                                  "Level_", name));
+               }
+           }
+       }
 
        // The subcycling snapshots (see WriteCheckpointFile). A checkpoint written before they
        // were saved, or at a level that had not taken a step, leaves them as a fresh level

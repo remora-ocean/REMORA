@@ -2279,6 +2279,10 @@ REMORA::init_only (int lev, Real time)
         amrex::Print() << "Boundary data loaded from netcdf file \n " << std::endl;
     }
 
+    // The ice boundary data is read separately from the ocean's: the ice can have an
+    // open boundary where the ocean's is closed.
+    init_ice_bdry_from_netcdf(lev);
+
     // Only need to read in rivers on level 0
     // Will need to be on higher levels eventually
     if (solverChoice.do_rivers) {
@@ -2521,6 +2525,7 @@ REMORA::init_only (int lev, Real time)
 #ifdef REMORA_USE_NETCDF
                 amrex::Print() << "Calling init_data_from_netcdf " << std::endl;
                 init_data_from_netcdf(lev);
+                init_ice_from_netcdf(lev);
                 bool apply_eminusp = false;
                 set_zeta_to_Ztavg(lev, apply_eminusp);
                 amrex::Print() << "Initial data loaded from netcdf file \n " << std::endl;
@@ -2590,6 +2595,39 @@ REMORA::ReadParameters ()
     }
 
     ParmParse pp(pp_prefix);
+
+    std::string sea_ice_model_string = REMORASeaIce::sea_ice_model_name(sea_ice_model);
+    pp.queryAdd("ice_model", sea_ice_model_string);
+    sea_ice_model = REMORASeaIce::parse_sea_ice_model(sea_ice_model_string);
+
+    if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+        if (max_level > 0) {
+            amrex::Abort("remora.ice_model runs on a single level only: the ice"
+                         " state is not interpolated to, or averaged down from,"
+                         " refined levels. Set amr.max_level = 0.");
+        }
+        if (ParallelDescriptor::IOProcessor()) {
+            amrex::Warning("The sea-ice model (remora.ice_model) is experimental.");
+        }
+        sea_ice_params.init_params(pp_prefix, sea_ice_bc_time_name);
+        amrex::ParmParse pp_ice(pp_prefix + ".ice");
+        pp_ice.queryarr("nc_bdry_file", nc_ice_bdry_file);
+#ifndef REMORA_USE_NETCDF
+        if (!nc_ice_bdry_file.empty() && !nc_ice_bdry_file[0].empty()) {
+            amrex::Abort("Not compiled with NetCDF, but remora.ice.nc_bdry_file is set");
+        }
+#endif
+        if (!sea_ice_params.advects() && sea_ice_params.no_advect_two_states &&
+            ParallelDescriptor::IOProcessor()) {
+            amrex::Warning("Sea ice without advection keeps two copies of the ice state, as ROMS"
+                           " does without ICE_ADVECT, so that such a run can be compared with ROMS."
+                           " Each copy is advanced only every other step, so the ice grows at about"
+                           " half the rate, and the heat flux into the ocean alternates from step to"
+                           " step. For a run that is not compared with ROMS, set"
+                           " remora.ice.no_advect_two_states = false: one ice state, advanced every"
+                           " step.");
+        }
+    }
 
     // Common physics and simulation parameters
     std::string biology_model_string = m_biology->name();
@@ -2883,7 +2921,7 @@ REMORA::ReadParameters ()
     num_files_at_level.resize(max_level + 1, 0);
 
     boundary_series.resize(max_level+1);
-
+    ice_boundary_series.resize(max_level+1);
 
     // NetCDF initialization and grid files, read independently of each other: with
     // hires_grid_level or hires_init_level set, the corresponding level 0 file is not
@@ -3037,6 +3075,23 @@ REMORA::ReadParameters ()
         pp_amr.queryAdd("regrid_int", regrid_int);
     }
     solverChoice.init_params(ncons, nscalar, cons_names);
+
+    // These need the solver options, which are read just above
+    if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+        if (!solverChoice.bulk_fluxes) {
+            amrex::Abort("remora.ice_model needs remora.bulk_fluxes = true: the air-ice heat"
+                         " flux, the air-ice stress and the open-water fluxes the ice weights"
+                         " are computed in the bulk flux.");
+        }
+        // The run's reference density and heat capacity, for remora.ice.use_rho0
+        sea_ice_params.rho0 = solverChoice.rho0;
+        sea_ice_params.Cp   = Cp;
+        if (verbose > 0) {
+            amrex::Print() << "Sea ice: water density " << sea_ice_params.RhoSW_eff()
+                           << " kg/m3 and heat capacity " << sea_ice_params.Cp_w_eff()
+                           << " J/kg/K in the ice thermodynamics\n";
+        }
+    }
 
     // The biology IC source is chosen independently of ic_type, but only one of the two
     // mixed combinations works: NetCDF physics with analytic biology. The reverse has no
@@ -3907,7 +3962,8 @@ REMORA::advance_biology (int lev, amrex::MultiFab const& old_state,
         .z_r = vec_z_r[lev].get(),
         .z_w = vec_z_w[lev].get(),
         .mask = vec_mskr[lev].get(),
-        .shortwave = vec_srflx[lev].get(),
+        .shortwave = REMORASeaIce::has_sea_ice(sea_ice_model) ? vec_srflx_ice[lev].get()
+                                                              : vec_srflx[lev].get(),
         .stress_u = vec_sustr[lev].get(),
         .stress_v = vec_svstr[lev].get(),
         .wind_u = vec_uwind[lev].get(),

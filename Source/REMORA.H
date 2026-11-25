@@ -37,6 +37,7 @@
 #include <REMORA_Derive.H>
 #include <REMORA_ErrorTag.H>
 #include <REMORA_Biology.H>
+#include <REMORA_SeaIce.H>
 #include "REMORA_ProbCoords.H"
 #include "REMORA_prob_common.H"
 
@@ -770,6 +771,74 @@ public:
     /** \brief coriolis factor (2D) */
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_fcor;
 
+    /** \brief prognostic sea-ice state, previous level (2D, REMORASeaIce::IceS)
+     *
+     * The components are ROMS `Si` with ROMS's own numbering; see
+     * REMORASeaIce::IceS. Only allocated when remora.ice_model is set. */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_s_old;
+    /** \brief prognostic sea-ice state, new level (2D, REMORASeaIce::IceS) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_s_new;
+    /** \brief internal sea-ice fields (2D, REMORASeaIce::IceF)
+     *
+     * ROMS `Fi`. Single level. Some carry over from one step to the next: Isst, T0mk,
+     * S0mk, IOmt and W_fr. */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_f;
+    /** \brief net surface heat flux over open water [W/m2] (ROMS Qnet_ao)
+     *
+     * bulk_fluxes() computes this alongside the ice-covered flux; the
+     * thermodynamics combines the two weighted by ice concentration. */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_Qnet_ao;
+    /** \brief net surface heat flux over ice [W/m2] (ROMS Qnet_ai) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_Qnet_ai;
+    /** \brief snowfall rate [m/s], diagnosed from rain < 0 (ROMS snow) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_snow;
+    /** \brief shortwave reaching the water after ice and snow attenuation [W/m2]
+     *
+     * ROMS attenuates `srflx` in place (bulk_flux.F). REMORA keeps it in its
+     * own field because a constant or driver-supplied vec_srflx is not refilled
+     * each step, so an in-place multiply would compound. The shortwave
+     * penetration reads this field when sea ice is on. */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_srflx_ice;
+    /** \brief in-situ density anomaly from rho_eos, kept for the sea ice
+     *
+     * The frazil converts a mass of ice into a thickness with (rho0 + rho), after
+     * setup_step's density is gone. Only allocated with remora.ice.do_frazil. */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_rho_ice;
+    /** \brief open-water wind stress, before the ice modifies it (ROMS sustr_ao) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_sustr_ao;
+    /** \brief open-water wind stress, v component (ROMS svstr_ao) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_svstr_ao;
+    /** \brief air-ice wind stress (ROMS sustr_ai = rhoAir*Cd_ai*Uwind*Wspeed) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_sustr_ai;
+    /** \brief air-ice wind stress, v component (ROMS svstr_ai) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_svstr_ai;
+
+    // The STAGGERED members of ROMS's Si and Fi. REMORASeaIce::IceS and IceF
+    // keep ROMS's component numbering, but a MultiFab holds one staggering, so
+    // the u- and v-point members live here instead and their slots in the
+    // multi-component fabs are never written.
+    /** \brief ice u-velocity, u points (ROMS Si isUice) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_u;
+    /** \brief ice v-velocity, v points (ROMS Si isVice) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_v;
+    /** \brief ice u-velocity before the last dynamics step, u points (ROMS Si(liuol) isUice
+     *         as ice_spdiw and ice_vbc see it) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_u_prev;
+    /** \brief ice v-velocity before the last dynamics step, v points */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_v_prev;
+    /** \brief EVP ice u-velocity, u points (ROMS Si isUevp) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_uevp;
+    /** \brief EVP ice v-velocity, v points (ROMS Si isVevp) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_vevp;
+    /** \brief mixed-layer u-velocity, u points (ROMS Fi icUavg) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_uavg;
+    /** \brief mixed-layer v-velocity, v points (ROMS Fi icVavg) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_vavg;
+    /** \brief air-ice u-stress on the ice, u points (ROMS Fi icAIus) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_aius;
+    /** \brief air-ice v-stress on the ice, v points (ROMS Fi icAIvs) */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_ice_aivs;
+
     /** \brief x_grid on rho points (2D) */
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> vec_xr;
     /** \brief y_grid on rho points (2D) */
@@ -995,6 +1064,74 @@ public:
                       amrex::MultiFab* mf_lhflx,
                       amrex::MultiFab* mf_shflx,
                       const int N);
+
+    /** \brief Advance the sea-ice model one baroclinic step (ROMS seaice.F).
+     *
+     * Called from setup_step, after the surface fluxes and before the right-hand sides, as
+     * in main3d.F. A no-op unless remora.ice_model is set. */
+    void advance_sea_ice (int lev, amrex::Real time, amrex::Real dt_lev);
+
+    /** \brief Read the initial sea-ice state from the NetCDF initial file */
+    void init_ice_from_netcdf (int lev);
+
+    /** \brief Set the initial sea-ice state from the problem's analytic hook */
+    void init_ice_analytic (int lev);
+
+    /** \brief Zero or extrapolate a face field on the domain-boundary faces
+     *         (ROMS bc_u2d_tile and bc_v2d_tile, normal faces) */
+    void ice_boundary_face_bc (int lev, amrex::MultiFab& mf, int dir);
+
+    /** \brief Ice-ocean velocity shear and mixed-layer velocity (ROMS ice_spdiw.F) */
+    void ice_spdiw (int lev);
+
+    /** \brief Air-ice and ice-ocean stress; REPLACES sustr/svstr under ice
+     *         (ROMS ice_vbc.F) */
+    void ice_vbc (int lev);
+
+    /** \brief The EVP ice-dynamics subcycle (ROMS seaice.F ICE_MOMENTUM block:
+     *         ice_evp, ice_evp_sig, ice_elastic, nEVP times) */
+    void ice_dynamics (int lev, amrex::Real dtice);
+
+    /** \brief MPDATA advection of the ice tracers plus the limiter
+     *         (ROMS ice_advect.F / ice_smolar.h / ice_limit.F) */
+    void ice_advect (int lev, amrex::Real dtice);
+
+    /** \brief Frazil ice in supercooled water; modifies the 3D temperature
+     *         (ROMS ice_frazil.F) */
+    void ice_frazil (int lev, amrex::Real dtice);
+
+    /** \brief One ice scalar's lateral boundary condition (ROMS ice_bc2d.F).
+     *
+     * `comp` is the component of vec_ice_s_new; which input row carries its
+     * condition comes from SeaIceParameters::ice_bc_var_for_comp.
+     *
+     * Called per field, from inside each stage, as in ROMS. */
+    void ice_bc2d (int lev, int comp);
+
+    /** \brief ROMS ice_bc2d.F on an explicit pair of time levels, as the
+     *         elastic subcycle calls it for the internal stresses
+     *         (ice_evp_sig.F:181-205). */
+    void ice_bc2d (int lev, int bc_var,
+                   amrex::MultiFab& S, const amrex::MultiFab& S_old, int comp,
+                   const amrex::MultiFab& mf_ui, const amrex::MultiFab& mf_vi,
+                   int nhalo);
+
+    /** \brief The ice temperature and enthalpy boundary condition
+     *         (ROMS ice_tibc.F) */
+    void ice_tibc (int lev);
+
+    /** \brief The ice velocity boundary conditions, u then v
+     *         (ROMS ice_uibc.F and ice_vibc.F, called together from
+     *         ice_elastic.F:727).
+     *
+     * Takes the two levels explicitly because ROMS calls it from INSIDE the
+     * EVP subcycle, where the pair is the subcycle's own old/new and not the
+     * stored ice velocity. */
+    void ice_velbc (int lev,
+                    amrex::MultiFab& mf_u_new, amrex::MultiFab& mf_v_new,
+                    const amrex::MultiFab& mf_u_old,
+                    const amrex::MultiFab& mf_v_old,
+                    amrex::Real dtice);
 
     /** \brief Wrapper function for prestep */
     void prestep (int lev,
@@ -1705,6 +1842,30 @@ public:
     void init_scalars_full_domain_from_netcdf ();
     /** \brief Boundary data initialization from NetCDF file */
     void init_bdry_from_netcdf (int lev);
+
+    /** \brief Open the ice boundary file and build one time series per ice BC
+     *         variable that needs data (ROMS get_data.F:1276 + ice_var.h).
+     *
+     * A variable whose sides are all local conditions gets no series, and
+     * neither does one the file does not contain -- that one falls back to the
+     * constant `remora.ice.bc_value.<var>`, and says so in the log. */
+    void init_ice_bdry_from_netcdf (int lev);
+
+    /** \brief Time-interpolate the ice boundary data to `time` (ROMS
+     *         set_data.F:1251, set_ngfld). Called once per ice step, before
+     *         any stage, so every call site in the step sees the same halo. */
+    void update_ice_bdry_data (int lev, amrex::Real time);
+
+    /** \brief The interpolated ice boundary data for one side of one ice BC
+     *         variable, or an EMPTY Array4 when that variable's values come
+     *         from the constant `remora.ice.bc_value.<var>`. */
+    amrex::Array4<const amrex::Real> ice_bdry_array (int lev, int bc_var, int side) const;
+
+    /** \brief Every ice MultiFab that has to survive a restart, paired with
+     *         the name it is stored under in the checkpoint.
+     *
+     * The checkpoint's write and read both use this list. */
+    amrex::Vector<std::pair<std::string, amrex::MultiFab*>> ice_checkpoint_fields (int lev);
     /** \brief Mask data initialization from NetCDF file */
     void init_masks_from_netcdf (int lev);
     /** \brief fill a rho-point mask on any layout of level lev from its NetCDF grid file(s) */
@@ -1973,6 +2134,13 @@ private:
     /** \brief Vector over BdyVars of boundary series data containers */
     amrex::Vector<amrex::Vector<std::unique_ptr<NCTimeSeriesBoundary>>> boundary_series;
 
+    /** Time-varying ICE boundary data, one series per ice BC variable per
+     *  level, in the order of SeaIceParameters::ice_bc_var_names. A null entry
+     *  means that variable's boundary values come from the constant
+     *  `remora.ice.bc_value.<var>` instead. ROMS's
+     *  BOUNDARY(ng)%iceG_west/east/south/north plus set_ngfld. */
+    amrex::Vector<amrex::Vector<std::unique_ptr<NCTimeSeriesBoundary>>> ice_boundary_series;
+
 #endif // REMORA_USE_NETCDF
     /** \brief iMultiFab for river positions; contents are indices of rivers */
     amrex::Vector<std::unique_ptr<amrex::iMultiFab>> vec_river_position;
@@ -2149,6 +2317,17 @@ private:
     int ncons = Tracer_comp + 1;
     /** \brief Selected ecosystem, owning its parameters and host-side kernels. */
     std::unique_ptr<REMORABiology::Biology> m_biology = REMORABiology::make_biology("none");
+    /** \brief Active sea-ice physics; none by default */
+    REMORASeaIce::SeaIceModel sea_ice_model = REMORASeaIce::SeaIceModel::none;
+    /** \brief Runtime parameters for the sea-ice model */
+    REMORASeaIce::SeaIceParameters sea_ice_params;
+    /** \brief Per-variable override of the sea-ice boundary time-coordinate
+     *         name (`remora.ice.bc_time_name.<var>`). Host-only: kept
+     *         here, not in SeaIceParameters, because that struct is captured
+     *         by value into device kernels and a std::string member would
+     *         make it non-device-copyable. Read in
+     *         REMORA_ice_bdry_data.cpp, written in SeaIceParameters::init_params. */
+    std::string sea_ice_bc_time_name[16];
     /** \brief Biology IC source, independent of the physical IC source. */
     REMORABiology::BiologyICType biology_ic_type = REMORABiology::BiologyICType::follow_ic_type;
     /** \brief Per-tracer values for biology_ic_type = constant, by tracer name. */
@@ -2463,6 +2642,13 @@ private:
     static amrex::Vector<amrex::Vector<std::string>> nc_grid_file;
     /** \brief NetCDF boundary data */
     static amrex::Vector<std::string> nc_bdry_file;
+
+    /** Time-varying ICE boundary data file(s), `remora.ice.nc_bdry_file`.
+     *
+     * Separate from the ocean's, because the ice can have an open boundary where the
+     * ocean's is closed. Left empty, every ice boundary value comes from
+     * `remora.ice.bc_value.<var>`. */
+    amrex::Vector<std::string> nc_ice_bdry_file;
 
     /** \brief Which level the high resolution bathymetry is at */
     int hires_grid_level = -1;

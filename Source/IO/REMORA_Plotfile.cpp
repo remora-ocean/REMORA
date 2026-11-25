@@ -1,9 +1,11 @@
 #include <REMORA.H>
+#include <REMORA_SeaIce.H>
 #include <REMORA_NonperiodicGeometry.H>
 #include "AMReX_Interp_3D_C.H"
 #include "AMReX_PlotFileUtil.H"
 
 using namespace amrex;
+
 
 static PhysBCFunctNoOp null_bc_for_fill;
 
@@ -137,6 +139,15 @@ REMORA::WritePlotFile (int istep_for_plot)
          if (plot_name == "h"    ) {varnames_2d_rho.push_back(plot_name); ncomp_mf_2d_rho++;}
          if (plot_name == "f"    ) {varnames_2d_rho.push_back(plot_name); ncomp_mf_2d_rho++;}
          if (plot_name == "visc2") {varnames_2d_rho.push_back(plot_name); ncomp_mf_2d_rho++;}
+         if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+             int n_icevar = 0;
+             const auto* icevars = REMORASeaIce::ice_plot_vars(n_icevar);
+             for (int k = 0; k < n_icevar; ++k) {
+                 if (plot_name == icevars[k].name) {
+                     varnames_2d_rho.push_back(plot_name); ncomp_mf_2d_rho++;
+                 }
+             }
+         }
          for (int n = 0; n < ncons; ++n) {
              const std::string diff2_name = std::string("diff2_") + cons_names[n];
              if (plot_name == diff2_name) {
@@ -340,6 +351,19 @@ REMORA::WritePlotFile (int istep_for_plot)
         if (plot_name == "f" ) {
             for (int lev = 0; lev <= finest_level; ++lev) { MultiFab::Copy(mf_2d_rho[lev],*vec_fcor[lev],0,icomp_rho,1,0); }
             icomp_rho++;
+        }
+        if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+            int n_icevar = 0;
+            const auto* icevars = REMORASeaIce::ice_plot_vars(n_icevar);
+            for (int k = 0; k < n_icevar; ++k) {
+                if (plot_name != icevars[k].name) { continue; }
+                for (int lev = 0; lev <= finest_level; ++lev) {
+                    const MultiFab& src = icevars[k].in_state ? *vec_ice_s_new[lev]
+                                                              : *vec_ice_f[lev];
+                    MultiFab::Copy(mf_2d_rho[lev], src, icevars[k].comp, icomp_rho, 1, 0);
+                }
+                icomp_rho++;
+            }
         }
         if (plot_name == "visc2" ) {
             for (int lev = 0; lev <= finest_level; ++lev) {

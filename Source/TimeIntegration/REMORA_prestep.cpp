@@ -176,7 +176,11 @@ REMORA::prestep (int lev,
             const Real mu1 = solverChoice.jerlov_mu1;
             const Real mu2 = solverChoice.jerlov_mu2;
             const Real Hscale2 = one / (solverChoice.rho0 * Cp);
-            Array4<Real const> const& srflx = vec_srflx[lev]->const_array(mfi);
+            // Under sea ice the shortwave reaching the water is the part that passes
+            // through the ice and snow, as ROMS attenuates srflx in bulk_flux.F
+            Array4<Real const> const& srflx = REMORASeaIce::has_sea_ice(sea_ice_model)
+                                            ? vec_srflx_ice[lev]->const_array(mfi)
+                                            : vec_srflx[lev]->const_array(mfi);
             Array4<Real const> const& mskr  = vec_mskr[lev]->const_array(mfi);
             Array4<Real> const& temp = S_new.array(mfi, Temp_comp);
 

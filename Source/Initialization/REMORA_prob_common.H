@@ -130,6 +130,22 @@ public:
           amrex::Error("Doing analytic masks, but not defined in prob.cpp");
     }
 
+    /**
+     * \brief Analytic sea-ice initial state. ROMS has no analytic ice initial
+     *        condition and starts from zero, so the default leaves it at zero.
+     *
+     * `mf_ice_r` is the rho-point ice state, indexed by REMORASeaIce::IceS;
+     * `mf_ice_u` and `mf_ice_v` are the ice velocity components.
+     */
+    virtual void
+    init_analytic_seaice (
+        int /*lev*/, const amrex::Geometry& /*geom*/,
+        SolverChoice const& /*m_solverChoice*/,
+        REMORA const& /*remora*/,
+        amrex::MultiFab& /*mf_ice_r*/,
+        amrex::MultiFab& /*mf_ice_u*/,
+        amrex::MultiFab& /*mf_ice_v*/) {}
+
     /** \brief Analytic biology initial condition. Problems locate their
      *         fields by tracer name through biology.declaration(), so the
      *         hook does not depend on a concrete ecosystem model. */

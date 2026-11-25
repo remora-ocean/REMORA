@@ -402,14 +402,19 @@ function(add_test_run TEST_NAME INPUT_NAME TEST_EXE OPTIONS)
 endfunction(add_test_run)
 
 # Run must succeed AND its log must contain LOG_SUBSTRING. For a code path whose answers are
-# not worth blessing into a gold file, but which must keep reaching the named behavior.
+# not worth blessing into a gold file, but which must keep reaching the named behavior. Any
+# further arguments are substrings the log must contain as well.
 function(add_test_log TEST_NAME TEST_EXE LOG_SUBSTRING)
 
     setup_test()
 
     resolve_test_exe("${TEST_DIR}" "${TEST_EXE}" TEST_EXE)
 
-    set(test_command sh -c "${MPI_COMMANDS} ${TEST_EXE} ${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.i > ${TEST_NAME}.log 2>&1 && grep -q -- \"${LOG_SUBSTRING}\" ${TEST_NAME}.log")
+    set(LOG_CLAUSE "")
+    foreach(_substring ${ARGN})
+        string(APPEND LOG_CLAUSE " && grep -q -- \"${_substring}\" ${TEST_NAME}.log")
+    endforeach()
+    set(test_command sh -c "${MPI_COMMANDS} ${TEST_EXE} ${CURRENT_TEST_BINARY_DIR}/${TEST_NAME}.i > ${TEST_NAME}.log 2>&1 && grep -q -- \"${LOG_SUBSTRING}\" ${TEST_NAME}.log${LOG_CLAUSE}")
 
     add_test(${TEST_NAME} ${test_command})
     set_tests_properties(${TEST_NAME}
@@ -650,6 +655,186 @@ add_test_r(Channel_Test_ML_seam         "remora_exec" "plt00010")
 # ref_ratio = 2).
 #=============================================================================
 add_test_log(Advection_ML_subcycle      "remora_exec" "with dt = 50")
+
+# SeaIceBox: a closed basin with an ice pack over its western 60 %, under a cold, windy, snowing
+# atmosphere. Most of the other SeaIce tests read values from the ice probe; this one is the
+# whole model as a user would run it, and the ocean fields in the gold file carry the ice's heat,
+# salt and momentum fluxes.
+add_test_r(SeaIceBox                    "remora_exec" "plt00010")
+
+# Sea-ice thermodynamics, ice grown from open water under -15 C air. The comparison of two
+# plotfiles does not cover the ice fields, so the values are read from the ice probe's line in the log: the state
+# the thermodynamics leaves in the probed cell at step 75. The concentration alone is weak, as
+# at 1 % cover it follows the open-water heat loss, so the thickness, the age and the interior
+# and surface temperatures are asserted with it.
+add_test_log(SeaIce_Thermo              "remora_exec"
+             "step 75 .*OUT Aice 0[.]01085.* Hice 0[.]003620.* Iage 0[.]01137.* Tice -2[.]251.* Isst -17[.]36")
+
+# The same run: the ice-ocean shear and the transfer coefficient it gives are not zero under a
+# 10 m/s wind. Zero means ice_spdiw or ice_vbc did not run.
+compose_test_input(SeaIce_Thermo_shear SeaIce_Thermo)
+add_test_log(SeaIce_Thermo_shear        "remora_exec"
+             "ICEVEL   step 75 .* IOvs 0[.]0[0-9]*[1-9].* IOmt 0[.]00[0-9]*[1-9]")
+
+# Salty water. Freezing leaves salt behind, so the surface salinity must rise above the 30.000
+# it starts from; a salt flux with the wrong sign lowers it. The other decks are too fresh for
+# the ice's salt flux to be anything but zero.
+compose_test_input(SeaIce_salt SeaIce_Thermo)
+add_test_log(SeaIce_salt                "remora_exec" "ICEPROBE step 75 cell (20,2) IN [^ ]* 30[.]0[1-9]")
+
+# The ice thermodynamics uses the run's reference density and heat capacity when
+# remora.ice.use_rho0 is set. The deck has rho0 = 1000 and ROMS's fixed value is 1026; without
+# the option the thickness is 0.0036207.
+compose_test_input(SeaIce_rho0 SeaIce_Thermo)
+add_test_log(SeaIce_rho0                "remora_exec" "step 75 .*OUT Aice 0[.]01113.* Hice 0[.]0037143")
+
+# Sea ice without bulk fluxes has no atmospheric forcing and is refused.
+compose_test_input(SeaIce_no_bulk_abort SeaIce_Thermo)
+add_test_abort(SeaIce_no_bulk_abort     "remora_exec" "needs remora.bulk_fluxes")
+
+# Wind blowing onto the closed west side. The stress on the wall face is zero, so the cell
+# against the wall has a smaller friction velocity than the interior: the third number of the
+# line is 0.76 of what the same run gives in mid-domain. With the wall face left at the blended
+# value the two are equal.
+compose_test_input(SeaIce_wall_stress SeaIce_Thermo)
+add_test_log(SeaIce_wall_stress         "remora_exec" "ICEPROBE step 75 cell (0,2) IN [^ ]* [^ ]* 0[.]00029982")
+
+# The same case with one ice state. Without advection ROMS advances two copies of
+# the ice state on alternate steps, which the default reproduces and which halves
+# the growth above; remora.ice.no_advect_two_states = false keeps one state.
+compose_test_input(SeaIce_Thermo_one_state SeaIce_Thermo)
+add_test_log(SeaIce_Thermo_one_state    "remora_exec" "Aice 0.02152")
+
+# The ocean differs with the ice on. This shows only that some ice hook reaches the ocean: the
+# bulk flux also scales the evaporation by the open-water fraction, so it does not by itself
+# show that the heat, salt and momentum fluxes the ice computes are applied. SeaIce_Thermo
+# (heat), SeaIce_salt (salt) and SeaIce_drag (momentum) show those.
+compose_test_input(SeaIce_ocean SeaIce_Thermo)
+add_test_r_selfdiffer(SeaIce_ocean         "remora_exec" "plt00100"
+                      "remora.ice_model=none" "remora.ice_model=mellor_kantha")
+
+# The ice state is not carried to refined levels, so a refined run with ice is refused.
+compose_test_input(SeaIce_refined_abort SeaIce_Thermo)
+add_test_abort(SeaIce_refined_abort     "remora_exec" "runs on a single level only")
+
+# Frazil ice. Pins the thickness the supercooled column makes in the probed cell. The value is
+# a snapshot: the bed slopes and the temperature profile is not uniform, so no closed form
+# gives it. Three digits catch the frazil being off, counted twice, or not kept between steps.
+# The ice area takes three digits: rounding alone moves it by 1e-5, across 0.9999.
+add_test_log(SeaIce_Frazil              "remora_exec" "step 75 .*OUT Aice 0[.]999.* Hice 4[.]083")
+
+# The same run: the open-water heat flux holds the shortwave after the ice has attenuated it.
+# Unattenuated, it is 11 W/m2 lower.
+compose_test_input(SeaIce_Frazil_sw SeaIce_Frazil)
+add_test_log(SeaIce_Frazil_sw           "remora_exec"
+             "ICEPROBE step 75 cell (20,2) IN [^ ]* [^ ]* [^ ]* [^ ]* [^ ]* 686[.]1")
+
+# The melt pond is capped at max_hmelt. The cap is set low enough for the rain to reach it, so
+# the pond depth is the input value.
+compose_test_input(SeaIce_pond_cap SeaIce_Frazil)
+add_test_log(SeaIce_pond_cap            "remora_exec" "step 75 .*OUT.* Hmel 0[.]001 ")
+
+# Snowfall on full ice cover with no ice motion. The snow depth is the snowfall accumulated:
+# 74 steps of 50 s at 0.002 kg/m2/s over the dry snow density of 330 kg/m3, 0.0224242 m.
+compose_test_input(SeaIce_snow SeaIce_Frazil)
+add_test_log(SeaIce_snow                "remora_exec" "step 75 .*OUT Aice 1 .* Hsno 0[.]022424")
+
+# The same run: snow falling on the ocean takes its latent heat of fusion from the open-water
+# latent heat flux, 3.347e5 * 0.002 = 669 W/m2. With that term the open-water heat flux is
+# 19.5 W/m2; without it, near the 686 W/m2 of the rain case.
+compose_test_input(SeaIce_snow_latent SeaIce_Frazil)
+add_test_log(SeaIce_snow_latent         "remora_exec"
+             "ICEPROBE step 75 cell (20,2) IN [^ ]* [^ ]* [^ ]* [^ ]* [^ ]* 19[.]5")
+
+# Warm air and strong sun: the one case in which the ice melts at its surface, so the one case
+# in which the air-ice heat flux, and the albedo and longwave in it, decide a state variable.
+# The pond depth is a snapshot.
+compose_test_input(SeaIce_melt SeaIce_Frazil)
+add_test_log(SeaIce_melt                "remora_exec" "step 75 .*OUT.* Hmel 0[.]005184")
+
+# The three internal stresses radiate through the west side of the thick-ice case. The
+# along-shore ice velocity in the cell on that side, after three steps, is a snapshot to nine
+# digits, and it depends on where the condition is applied:
+#     0.014178972082  the condition applied inside every elastic subcycle, as ROMS applies it
+#     0.014178972209  the condition applied in the last subcycle only
+#     0.014178971938  that side closed
+# Nine digits are needed because the condition moves this velocity by one part in 1e8.
+compose_test_input(SeaIce_stress_radiation SeaIce_Frazil)
+add_test_log(SeaIce_stress_radiation    "remora_exec" "ICEVEL   step 2 cell (0,2) Uice 0 Vice 0[.]0141789720")
+
+# Stationary ice with the bulk ice-ocean drag: the drag coefficient reaches the ocean only
+# through the stress the ice puts on it, so the ocean must change with it.
+compose_test_input(SeaIce_drag SeaIce_Frazil)
+add_test_r_selfdiffer(SeaIce_drag          "remora_exec" "plt00100"
+                      "remora.ice.Cd_io=7.5e-3" "remora.ice.Cd_io=7.5e-2")
+
+# The ice open boundary. The east ghost column under a `clamped` condition holds the boundary
+# value itself: Aice 0.5 and Hice 0.2 in the ghost cell (39,2). A condition applied to the
+# wrong component, on the wrong side, at the wrong point of the step or to the wrong MultiFab
+# leaves another value there. With all four sides `closed` the cell holds the interior value
+# (0.0216), while a probed interior cell differs between the two runs by one part in 1e7, so
+# the ghost value is what is asserted.
+add_test_log(SeaIce_BC                  "remora_exec" "side E cell (39,2) Aice 0.5 Hice 0.2")
+
+# The same run, read for what the line above does not check. The ice velocity normal to the
+# closed east side is zero.
+compose_test_input(SeaIce_BC_wall SeaIce_BC)
+add_test_log(SeaIce_BC_wall             "remora_exec" "ICEBC    step 75 side E .* Uice 0 Vice")
+
+# The ice velocity in the probed interior cell. A snapshot: it moves with the air-ice stress,
+# the ice-ocean drag, the sea-surface tilt and the velocity boundary conditions.
+compose_test_input(SeaIce_BC_vel SeaIce_BC)
+add_test_log(SeaIce_BC_vel              "remora_exec" "ICEVEL   step 75 .* Uice 0[.]0376.* Vice 0[.]0891")
+
+# The ghost cell of the radiation side does not stay at the zero it starts from.
+compose_test_input(SeaIce_BC_radiation SeaIce_BC)
+add_test_log(SeaIce_BC_radiation        "remora_exec" "side W cell (-1,2) Aice 0[.]0*[1-9]")
+
+# Without dynamics or advection the condition on the ice temperature is applied only after
+# the thermodynamics, so the clamped -4 C on the east side comes from that call.
+compose_test_input(SeaIce_BC_thermo SeaIce_BC)
+add_test_log(SeaIce_BC_thermo           "remora_exec" "side E cell (39,2) .* Tice -4 Enth -0[.]8")
+
+# The ice boundary values read from a NetCDF file. A clamped ghost cell holds the record's value
+# at the probed index and the model time, so the numbers follow from the file alone; its contents
+# are written out in SeaIce_BCfile_additions.i. A wrong record, side, index, stagger or time
+# interval gives other numbers, and a variable that does not read the file gives zero. The Aice
+# value on the west and the Vice value on the south are snapshots: those sides are radiation with
+# nudging, where the record is the target of the nudging and not the value.
+if (REMORA_ENABLE_PNETCDF)
+  compose_test_input(SeaIce_BCfile SeaIce_BC)
+  add_test_log(SeaIce_BCfile            "remora_exec"
+               "step 75 side E cell (39,2) Aice 0[.]3449401927.* Hice 0[.]2949700963.* Tice -2[.]634581349.* Enth -0[.]777122714.* Uice 0[.]1498656462.* Vice -0[.]0259104308"
+               "step 75 side W cell (-1,2) Aice 0[.]1045"
+               "records Aice_west Aice_east")
+  compose_test_input(SeaIce_BCfile_ns SeaIce_BC)
+  add_test_log(SeaIce_BCfile_ns         "remora_exec"
+               "step 75 side N cell (20,4) Aice 0[.]5429401927.* Hice 0[.]5289700963.* Tice -2[.]940581349.* Enth -1[.]555479599.* Uice 0[.]4728656462.* Vice 0[.]4110895691"
+               "step 75 side S cell (20,-1) .* Hice 0[.]5589700963.* Tice -2[.]910581349.* Enth -1[.]626927937.* Uice 0[.]5028656462.* Vice 0[.]4412"
+               "records Vice_south Vice_north")
+endif ()
+
+# The antidiffusive pass of the ice advection changes the answer.
+compose_test_input(SeaIce_mpdata SeaIce_BC)
+add_test_r_selfdiffer(SeaIce_mpdata        "remora_exec" "plt00100"
+                      "remora.ice.advect_upwind=true" "remora.ice.advect_upwind=false")
+
+# One box against several, bit for bit, on the plotfile and on every checkpoint field, the ice
+# state among them. The first cuts the west and east open sides and the periodic ones, the
+# second the south and north open sides.
+compose_test_input(SeaIce_layout SeaIce_BC)
+add_test_layout(SeaIce_layout SeaIce_layout "remora_exec" "plt00100" "chk00100"
+                "remora.check_int=100 amr.max_grid_size=64"
+                "remora.check_int=100 amr.max_grid_size_x=13 amr.max_grid_size_y=8 amr.blocking_factor=1")
+compose_test_input(SeaIce_layout_ns SeaIce_BC)
+add_test_layout(SeaIce_layout_ns SeaIce_layout_ns "remora_exec" "plt00100" "chk00100"
+                "remora.check_int=100 amr.max_grid_size=64"
+                "remora.check_int=100 amr.max_grid_size=7 amr.blocking_factor=1")
+
+# A restart carries the ice. 40 steps with the checkpoint at 20, enough for ice to grow, the
+# EVP subcycle to run and the advection to move it. A restart with remora.ice_model = none is
+# already exact, so a failure here is the ice.
+add_test_restart_exact(SeaIce_Restart    "remora_exec" "plt00040" "chk00020")
 
 # The load-bearing one: at a timestep ratio of 1 the recursive driver must reproduce
 # timeStepML, separating a broken driver from the answer changes subcycling legitimately

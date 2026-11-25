@@ -658,6 +658,31 @@ void REMORA::resize_stuff(int lev)
     vec_metric_v.resize(lev+1);
     vec_metric_p.resize(lev+1);
     vec_fcor.resize(lev+1);
+
+    if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+        vec_ice_s_old.resize(lev+1);
+        vec_ice_s_new.resize(lev+1);
+        vec_ice_f.resize(lev+1);
+        vec_Qnet_ao.resize(lev+1);
+        vec_Qnet_ai.resize(lev+1);
+        vec_snow.resize(lev+1);
+        vec_srflx_ice.resize(lev+1);
+        vec_rho_ice.resize(lev+1);
+        vec_sustr_ao.resize(lev+1);
+        vec_svstr_ao.resize(lev+1);
+        vec_sustr_ai.resize(lev+1);
+        vec_svstr_ai.resize(lev+1);
+        vec_ice_u.resize(lev+1);
+        vec_ice_u_prev.resize(lev+1);
+        vec_ice_v_prev.resize(lev+1);
+        vec_ice_uevp.resize(lev+1);
+        vec_ice_uavg.resize(lev+1);
+        vec_ice_aius.resize(lev+1);
+        vec_ice_v.resize(lev+1);
+        vec_ice_vevp.resize(lev+1);
+        vec_ice_vavg.resize(lev+1);
+        vec_ice_aivs.resize(lev+1);
+    }
     vec_pm_full_domain.resize(hires_grid_level+1);
     vec_pn_full_domain.resize(hires_grid_level+1);
 
@@ -789,6 +814,36 @@ void REMORA::init_stuff (int lev, const BoxArray& ba, const DistributionMapping&
 
     vec_sustr[lev].reset(new MultiFab(convert(ba2d,IntVect(1,0,0)),dm,1,IntVect(NGROW,NGROW,0))); //2d, surface stress
     vec_svstr[lev].reset(new MultiFab(convert(ba2d,IntVect(0,1,0)),dm,1,IntVect(NGROW,NGROW,0))); //2d
+
+    if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+        // The sea-ice state is rho-point and two-level, as ROMS Si; the internal
+        // fields are rho-point and single-level, as ROMS Fi. The ice velocities and
+        // the stresses on u and v faces have MultiFabs of their own.
+        vec_ice_s_old[lev].reset(new MultiFab(ba2d,dm,REMORASeaIce::IceS::NumComps,IntVect(NGROW,NGROW,0)));
+        vec_ice_s_new[lev].reset(new MultiFab(ba2d,dm,REMORASeaIce::IceS::NumComps,IntVect(NGROW,NGROW,0)));
+        vec_ice_f[lev].reset(new MultiFab(ba2d,dm,REMORASeaIce::IceF::NumComps,IntVect(NGROW,NGROW,0)));
+        vec_Qnet_ao[lev].reset(new MultiFab(ba2d,dm,1,IntVect(NGROW,NGROW,0)));
+        vec_Qnet_ai[lev].reset(new MultiFab(ba2d,dm,1,IntVect(NGROW,NGROW,0)));
+        vec_snow[lev].reset(new MultiFab(ba2d,dm,1,IntVect(NGROW,NGROW,0)));
+        vec_srflx_ice[lev].reset(new MultiFab(ba2d,dm,1,IntVect(NGROW,NGROW,0)));
+        if (sea_ice_params.do_frazil) {
+            vec_rho_ice[lev].reset(new MultiFab(ba,dm,1,IntVect(NGROW,NGROW,0)));
+        }
+        vec_sustr_ao[lev].reset(new MultiFab(convert(ba2d,IntVect(1,0,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_svstr_ao[lev].reset(new MultiFab(convert(ba2d,IntVect(0,1,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_sustr_ai[lev].reset(new MultiFab(convert(ba2d,IntVect(1,0,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_svstr_ai[lev].reset(new MultiFab(convert(ba2d,IntVect(0,1,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_u[lev].reset(new MultiFab(convert(ba2d,IntVect(1,0,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_u_prev[lev].reset(new MultiFab(convert(ba2d,IntVect(1,0,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_v_prev[lev].reset(new MultiFab(convert(ba2d,IntVect(0,1,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_uevp[lev].reset(new MultiFab(convert(ba2d,IntVect(1,0,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_uavg[lev].reset(new MultiFab(convert(ba2d,IntVect(1,0,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_aius[lev].reset(new MultiFab(convert(ba2d,IntVect(1,0,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_v[lev].reset(new MultiFab(convert(ba2d,IntVect(0,1,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_vevp[lev].reset(new MultiFab(convert(ba2d,IntVect(0,1,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_vavg[lev].reset(new MultiFab(convert(ba2d,IntVect(0,1,0)),dm,1,IntVect(NGROW,NGROW,0)));
+        vec_ice_aivs[lev].reset(new MultiFab(convert(ba2d,IntVect(0,1,0)),dm,1,IntVect(NGROW,NGROW,0)));
+    }
 
     if (solverChoice.bottom_stress_type == BottomStressType::linear) {
         //2d, linear drag coefficient [m/s], defined at rho, somehow related to rdrg
@@ -961,6 +1016,36 @@ void REMORA::init_stuff (int lev, const BoxArray& ba, const DistributionMapping&
     vec_btflux[lev]->setVal(zero);
     vec_sustr[lev]->setVal(zero);
     vec_svstr[lev]->setVal(zero);
+
+    if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+        // Zero is the ice-free state for every component except Tice, which is
+        // set to the surface water temperature by the thermodynamics wherever
+        // there is no ice, so zero here is only a placeholder before step 1.
+        vec_ice_s_old[lev]->setVal(zero);
+        vec_ice_s_new[lev]->setVal(zero);
+        vec_ice_f[lev]->setVal(zero);
+        vec_Qnet_ao[lev]->setVal(zero);
+        vec_Qnet_ai[lev]->setVal(zero);
+        vec_snow[lev]->setVal(zero);
+        vec_srflx_ice[lev]->setVal(zero);
+        if (sea_ice_params.do_frazil) {
+            vec_rho_ice[lev]->setVal(zero);
+        }
+        vec_sustr_ao[lev]->setVal(zero);
+        vec_svstr_ao[lev]->setVal(zero);
+        vec_sustr_ai[lev]->setVal(zero);
+        vec_svstr_ai[lev]->setVal(zero);
+        vec_ice_u[lev]->setVal(zero);
+        vec_ice_u_prev[lev]->setVal(zero);
+        vec_ice_v_prev[lev]->setVal(zero);
+        vec_ice_uevp[lev]->setVal(zero);
+        vec_ice_uavg[lev]->setVal(zero);
+        vec_ice_aius[lev]->setVal(zero);
+        vec_ice_v[lev]->setVal(zero);
+        vec_ice_vevp[lev]->setVal(zero);
+        vec_ice_vavg[lev]->setVal(zero);
+        vec_ice_aivs[lev]->setVal(zero);
+    }
 
     // Set initial linear drag coefficient
     if (solverChoice.bottom_stress_type == BottomStressType::linear) {

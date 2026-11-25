@@ -15,6 +15,7 @@
 #include <AMReX_ParmParse.H>
 
 #include "REMORA.H"
+#include "REMORA_SeaIce.H"
 #include "REMORA_DateClock.H"
 #include "REMORA_NCInterface.H"
 #include "REMORA_NCPlotFile.H"
@@ -881,6 +882,39 @@ void REMORA::WriteNCPlotFile_which(int lev, MultiFab const* plotMF,
             ncf.var(nm).put_attr("field", nm + ", scalar, series");
         }
 
+        // The sea ice, under ROMS's names. shflux and stflx_salt are the surface
+        // fluxes the ocean was given after the ice replaced them; shflux includes the
+        // shortwave, as ROMS's does, and swrad_water is the shortwave reaching the water.
+        if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+            auto def_ice_var = [&] (const std::string& nm, const std::string& long_name,
+                                    const std::string& units, const std::string& ny_name,
+                                    const std::string& nx_name, const std::string& coords) {
+                ncf.def_var_fill(nm, ncutils::NCDType::Real, { nt_name, ny_name, nx_name }, &netcdf_fill_value);
+                ncf.var(nm).put_attr("long_name", long_name);
+                ncf.var(nm).put_attr("units", units);
+                ncf.var(nm).put_attr("time","ocean_time");
+                ncf.var(nm).put_attr("grid","grid");
+                ncf.var(nm).put_attr("coordinates", coords);
+                ncf.var(nm).put_attr("field", nm + ", scalar, series");
+            };
+            int n_icevar = 0;
+            const auto* icevars = REMORASeaIce::ice_hist_vars(n_icevar);
+            for (int n = 0; n < n_icevar; ++n) {
+                def_ice_var(icevars[n].name, icevars[n].long_name, icevars[n].units,
+                            ny_r_name, nx_r_name, "x_rho y_rho ocean_time");
+            }
+            def_ice_var("shflux", "surface net heat flux", "watt meter-2",
+                        ny_r_name, nx_r_name, "x_rho y_rho ocean_time");
+            def_ice_var("stflx_salt", "surface salt flux applied to the ocean", "meter second-1",
+                        ny_r_name, nx_r_name, "x_rho y_rho ocean_time");
+            def_ice_var("swrad_water", "shortwave radiation reaching the water", "watt meter-2",
+                        ny_r_name, nx_r_name, "x_rho y_rho ocean_time");
+            def_ice_var("Uice", "ice u-velocity", "meter second-1", ny_u_name, nx_u_name, "x_u y_u ocean_time");
+            def_ice_var("Uevp", "elastic ice u-velocity", "meter second-1", ny_u_name, nx_u_name, "x_u y_u ocean_time");
+            def_ice_var("Vice", "ice v-velocity", "meter second-1", ny_v_name, nx_v_name, "x_v y_v ocean_time");
+            def_ice_var("Vevp", "elastic ice v-velocity", "meter second-1", ny_v_name, nx_v_name, "x_v y_v ocean_time");
+        }
+
         if (solverChoice.output_forcing && vec_uwind[lev] != nullptr) {
             // Surface winds, along the grid axes as the model uses them
             for (const auto& [nm, long_name] : { std::make_pair("Uwind", "surface u-wind component"),
@@ -1405,6 +1439,45 @@ void REMORA::WriteNCPlotFile_which(int lev, MultiFab const* plotMF,
                                           { local_nt,       local_ny,       local_nx });
             }
 
+            if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+                auto put_ice = [&] (const std::string& nm, FArrayBox& tmp) {
+                    Gpu::streamSynchronize();
+                    auto nc_var = collector.var(ncf, nm);
+                    nc_var.put(tmp.dataPtr(), { local_start_nt, local_start_y, local_start_x },
+                                              { local_nt,       local_ny,       local_nx });
+                };
+                int n_icevar = 0;
+                const auto* icevars = REMORASeaIce::ice_hist_vars(n_icevar);
+                for (int n = 0; n < n_icevar; ++n) {
+                    const MultiFab& src = icevars[n].in_state ? *vec_ice_s_new[lev] : *vec_ice_f[lev];
+                    FArrayBox tmp;
+                    tmp.resize(tmp_bx_2d, 1, amrex::The_Pinned_Arena());
+                    tmp.template copy<RunOn::Device>(src[mfi.index()], icevars[n].comp, 0, 1);
+                    put_ice(icevars[n].name, tmp);
+                }
+                const Real Hscale_ice = solverChoice.rho0 * Cp;
+                {
+                    // The surface heat flux the ocean was given, in W/m2
+                    FArrayBox tmp;
+                    tmp.resize(tmp_bx_2d, 1, amrex::The_Pinned_Arena());
+                    tmp.template copy<RunOn::Device>((*vec_stflx[lev])[mfi.index()], Temp_comp, 0, 1);
+                    tmp.mult<RunOn::Device>(Hscale_ice);
+                    put_ice("shflux", tmp);
+                }
+                {
+                    FArrayBox tmp;
+                    tmp.resize(tmp_bx_2d, 1, amrex::The_Pinned_Arena());
+                    tmp.template copy<RunOn::Device>((*vec_stflx[lev])[mfi.index()], Salt_comp, 0, 1);
+                    put_ice("stflx_salt", tmp);
+                }
+                {
+                    FArrayBox tmp;
+                    tmp.resize(tmp_bx_2d, 1, amrex::The_Pinned_Arena());
+                    tmp.template copy<RunOn::Device>((*vec_srflx_ice[lev])[mfi.index()], 0, 0, 1);
+                    put_ice("swrad_water", tmp);
+                }
+            }
+
             if (solverChoice.output_forcing)
             {
                 const Real Hscale = solverChoice.rho0 * Cp;
@@ -1749,6 +1822,19 @@ void REMORA::WriteNCPlotFile_which(int lev, MultiFab const* plotMF,
                 auto nc_plot_var = collector.var(ncf, "sustr");
                 nc_plot_var.put(tmp.dataPtr(), { local_start_nt, local_start_y, local_start_x }, { local_nt, local_ny, local_nx });
             }
+            if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+                const std::array<std::pair<const char*, MultiFab*>, 2>
+                    ice_vel {{ {"Uice", vec_ice_u[lev].get()}, {"Uevp", vec_ice_uevp[lev].get()} }};
+                for (const auto& [nm, mf] : ice_vel) {
+                    FArrayBox tmp;
+                    tmp.resize(tmp_bx_2d, 1, amrex::The_Pinned_Arena());
+                    tmp.template copy<RunOn::Device>((*mf)[mfi.index()], 0, 0, 1);
+                    Gpu::streamSynchronize();
+
+                    auto nc_plot_var = collector.var(ncf, nm);
+                    nc_plot_var.put(tmp.dataPtr(), { local_start_nt, local_start_y, local_start_x }, { local_nt, local_ny, local_nx });
+                }
+            }
             {
                 FArrayBox tmp;
                 tmp.resize(tmp_bx_2d, 1, amrex::The_Pinned_Arena());
@@ -1845,6 +1931,19 @@ void REMORA::WriteNCPlotFile_which(int lev, MultiFab const* plotMF,
 
                 auto nc_plot_var = collector.var(ncf, "svstr");
                 nc_plot_var.put(tmp.dataPtr(), { local_start_nt, local_start_y, local_start_x }, { local_nt, local_ny, local_nx });
+            }
+            if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+                const std::array<std::pair<const char*, MultiFab*>, 2>
+                    ice_vel {{ {"Vice", vec_ice_v[lev].get()}, {"Vevp", vec_ice_vevp[lev].get()} }};
+                for (const auto& [nm, mf] : ice_vel) {
+                    FArrayBox tmp;
+                    tmp.resize(tmp_bx_2d, 1, amrex::The_Pinned_Arena());
+                    tmp.template copy<RunOn::Device>((*mf)[mfi.index()], 0, 0, 1);
+                    Gpu::streamSynchronize();
+
+                    auto nc_plot_var = collector.var(ncf, nm);
+                    nc_plot_var.put(tmp.dataPtr(), { local_start_nt, local_start_y, local_start_x }, { local_nt, local_ny, local_nx });
+                }
             }
             {
                 FArrayBox tmp;

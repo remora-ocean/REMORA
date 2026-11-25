@@ -4,19 +4,22 @@
 Regression Tests
 ================
 
-There are currently 71 regression tests which are run as part of every PR on a range of architectures:
+There are currently 98 regression tests which are run as part of every PR on a range of architectures:
 
-* 22 that compare a plotfile against a stored reference;
-* 6 that compare two runs of the model against each other, or a run against its own initial state, and
+* 23 that compare a plotfile against a stored reference;
+* 12 that compare two runs of the model against each other, or a run against its own initial state, and
   need no reference;
 * 6 that assert values against an external reference;
 * 10 that assert the structure of the refined grid;
 * 8 that assert how far an integrated quantity drifts over a run;
-* 8 that assert a run reaches a behavior it reports in its log;
-* 11 that assert a misconfigured input fails for the stated reason.
+* 26 that assert a run reaches a behavior, or a value, it reports in its log;
+* 13 that assert a misconfigured input fails for the stated reason.
 
 PnetCDF builds add two more that assert the structure of the refined grid, read from a NetCDF grid
-file's ``refinement`` variable (see :ref:`sec:ci-tagging-tests`).
+file's ``refinement`` variable (see :ref:`sec:ci-tagging-tests`), and two that read the sea-ice
+boundary values from a NetCDF file.
+
+Of these, 27 are the sea-ice tests (:ref:`sec:ci-seaice-tests`), 29 in PnetCDF builds.
 
 There are also five unit tests, ``DateClock``, ``LatLonRegrid``, ``BoundaryInterp``, ``BiologyInterface`` and, in PnetCDF builds, ``NCFormats``, which is also labelled ``regression``. The CI tests use cmake and are based on the version
 of AMReX in the REMORA submodule. This suite can be run following the
@@ -739,6 +742,113 @@ Plotfile variable tests
 +---------------------------------+----------+---------------------------------------------------------+
 
 The half values are in the top and bottom cells, whose surface and bottom w-levels start at zero.
+
+.. _sec:ci-seaice-tests:
+
+Sea-ice tests
+-------------
+
+These cover the sea-ice model (:ref:`sec:SeaIce`). All but ``SeaIceBox`` are short runs of the
+``BoundaryLayer`` problem with winter forcing, and most are one of three base cases
+(``SeaIce_Thermo``, ``SeaIce_Frazil``, ``SeaIce_BC``) with a few lines changed. Most read values
+from the ice probe in the log (``remora.ice.probe_i``, ``remora.ice.probe_j``); three compare a run
+with and without one term (``add_test_r_selfdiffer``); two compare layouts, one a restart, and two
+are inputs that must be rejected. A step the probe prints is the number of steps completed before it.
+
++---------------------------------+----------+---------------------------------------------------------+
+| Test                            | nx ny nz | What it asserts                                         |
++=================================+==========+=========================================================+
+| SeaIceBox                       | 32 16 8  | a whole run against a gold plotfile after ten steps: a  |
+|                                 |          | closed basin with an ice pack over its western 60 %,    |
+|                                 |          | under a cold, windy, snowing atmosphere                 |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_Thermo                   | 39 4 30  | ice grown from open water has the expected              |
+|                                 |          | concentration, thickness, age, temperature and surface  |
+|                                 |          | temperature after 76 steps                              |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_Thermo_one_state         | 39 4 30  | with one ice state instead of two, about twice as much  |
+|                                 |          | ice grows                                               |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_Thermo_shear             | 39 4 30  | the ice-ocean shear and drag are not zero               |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_salt                     | 39 4 30  | freezing raises the salinity of salty water             |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_wall_stress              | 39 4 30  | the surface stress on a closed wall face is zero        |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_rho0                     | 39 4 30  | ``remora.ice.use_rho0`` changes the ice growth to the   |
+|                                 |          | expected value                                          |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_ocean                    | 39 4 30  | the ocean differs with and without ice                  |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_Frazil                   | 39 4 30  | supercooled water makes the expected frazil ice         |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_Frazil_sw                | 39 4 30  | the ice attenuates the shortwave reaching the ocean     |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_pond_cap                 | 39 4 30  | the melt pond stops at ``remora.ice.max_hmelt``         |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_snow                     | 39 4 30  | the snow depth equals the snowfall accumulated          |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_snow_latent              | 39 4 30  | snow falling on open water takes its latent heat of     |
+|                                 |          | fusion from the open-water heat flux                    |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_melt                     | 39 4 30  | warm air and strong sun melt the ice surface: the melt  |
+|                                 |          | pond has the expected depth                             |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_drag                     | 39 4 30  | the ice-ocean drag coefficient changes the ocean under  |
+|                                 |          | stationary ice                                          |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_stress_radiation         | 39 4 30  | the ice velocity in the cell on a side the stresses     |
+|                                 |          | radiate through has the expected value after 3 steps,   |
+|                                 |          | to nine digits; applying the condition once a step, or  |
+|                                 |          | closing the side, gives another value                   |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_BC                       | 39 4 30  | a ``clamped`` side holds the boundary value             |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_BC_wall                  | 39 4 30  | no ice crosses a ``closed`` side                        |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_BC_vel                   | 39 4 30  | the ice velocity in the probed cell has the expected    |
+|                                 |          | value                                                   |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_BC_radiation             | 39 4 30  | the ghost cell of a ``radiation`` side is not zero      |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_BC_thermo                | 39 4 30  | ``Tice`` is clamped without advection too               |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_BCfile                   | 39 4 30  | the west and east boundary values are the ones in a     |
+|                                 |          |                                                         |
+| (PnetCDF builds only)           |          | NetCDF file, at the right index and time                |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_BCfile_ns                | 39 4 30  | the same on the south and north                         |
+|                                 |          |                                                         |
+| (PnetCDF builds only)           |          |                                                         |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_mpdata                   | 39 4 30  | the antidiffusive MPDATA pass changes the answer        |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_layout                   | 39 16 30 | one box and several agree bit for bit, with the west    |
+|                                 |          | and east ice boundaries open and cut                    |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_layout_ns                | 39 4 30  | the same with the south and north open and cut          |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_Restart                  | 39 4 30  | a restarted run matches the uninterrupted one bit for   |
+|                                 |          | bit                                                     |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_refined_abort            | 39 4 30  | a refined level with sea ice is rejected                |
++---------------------------------+----------+---------------------------------------------------------+
+| SeaIce_no_bulk_abort            | 39 4 30  | sea ice without bulk surface fluxes is rejected         |
++---------------------------------+----------+---------------------------------------------------------+
+
+Where a test says "expected", the value is one REMORA produced, recorded so that a change is
+noticed; the snow depth, the pond cap and the clamped boundary values follow from the inputs instead.
+``SeaIce_Thermo`` runs with two ice states (see :ref:`sec:SeaIce-no-advection`).
+
+``SeaIceBox`` runs the model as a user would. Its problem setup is
+``SeaIceBox`` in ``Exec/REMORA_Prob.cpp``, with the analytic ice state in
+``Source/Prob/REMORA_InitAnalyticSeaIce_SeaIceBox.H``. The comparison with its gold
+covers the ocean fields, and so sees the ice through them.
+
+No test reaches the NetCDF ice initial state or the ice in the NetCDF history output.
+``Exec/LakeIce``, the myROMS ``LAKE_ICE`` case, is not
+a test either: it needs the ROMS grid and an initial state from a ROMS spin-up. See
+``Exec/LakeIce/README.rst``.
 
 Nightly Regression Tests on CPU
 -------------------------------

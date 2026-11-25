@@ -66,6 +66,12 @@ REMORA::Advance (int lev, Real time, Real dt_lev, int iteration, int ncycle)
     //***************************************************
     advance_3d_ml(lev, dt_lev, wvel_skip_substep(lev, iteration, ncycle));
 
+    // Frazil ice works on the updated tracers, as ROMS ice_frazil.F does (nnew).
+    // The rest of the sea ice is stepped in setup_step.
+    if (REMORASeaIce::has_sea_ice(sea_ice_model) && sea_ice_params.do_frazil) {
+        ice_frazil(lev, dt_lev);
+    }
+
     // vert_mean_3d has just replaced the depth mean of the fine 3D velocity with the
     // barotropic transport the parent imposed, while its shear is still the profile the
     // parent handed over at the start of the step. Nothing reconciles the two, so the

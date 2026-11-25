@@ -30,6 +30,8 @@ REMORA::init_analytic(int lev)
 {
     prob->init_analytic_prob(lev, geom[lev], solverChoice, *this, prob_coords(lev), *cons_new[lev], *xvel_new[lev], *yvel_new[lev]);
 
+    init_ice_analytic(lev);
+
     set_grid_scale(lev);
 }
 

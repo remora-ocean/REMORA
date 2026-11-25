@@ -193,6 +193,15 @@ REMORA::setup_step (int lev, Real time, Real dt_lev)
 
         Array4<Real const> const& state_old = S_old.const_array(mfi);
         rho_eos(gbx2,state_old,rho,rhoA,rhoS,bvf,alpha,beta,Hz,z_w,z_r,h,mskr,N);
+        // Keep the density anomaly for the frazil ice, which runs at the end of
+        // the step when mf_rho (a local) is gone. ice_frazil.F needs
+        // (rho0 + rho) to turn a frazil mass into a thickness.
+        if (REMORASeaIce::has_sea_ice(sea_ice_model) && sea_ice_params.do_frazil) {
+            Array4<Real> const& rho_ice = vec_rho_ice[lev]->array(mfi);
+            ParallelFor(gbx2, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                rho_ice(i,j,k) = rho(i,j,k);
+            });
+        }
     }
 
     const Real Cdb_min = solverChoice.Cdb_min;
@@ -257,6 +266,11 @@ REMORA::setup_step (int lev, Real time, Real dt_lev)
             });
         }
     }
+
+    // The sea ice replaces the surface stress and the surface heat flux and adds
+    // to the salt flux, so it runs after they are assembled and before anything
+    // reads them (ROMS main3d.F: bulk_flux, set_vbc, seaice, rhs3d).
+    advance_sea_ice(lev, time, dt_lev);
 
     // The logarithmic drag coefficient is formed in a loop of its own: the stress at a
     // tile's low face reads it at i-1 (j-1), which another tile, possibly on another

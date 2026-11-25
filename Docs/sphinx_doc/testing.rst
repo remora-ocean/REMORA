@@ -155,7 +155,8 @@ say the baseline was right, and it cannot notice a feature that has silently sto
     ``below`` partner cannot pass because the case has stopped exercising anything.
 
 ``add_test_log``
-    The run must succeed **and** its log must contain the given substring. For a code path whose answers
+    The run must succeed **and** its log must contain the given substring; further arguments are
+    substrings it must contain as well. For a code path whose answers
     are not worth a gold file but which must keep reaching a behavior it reports, or for a diagnostic that
     aborts on failure and prints a line on success.
 

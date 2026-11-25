@@ -76,6 +76,7 @@ In addition to this documentation, there is API documentation for REMORA generat
    Numerical_Solution_Technique.rst
    Particles.rst
    Plotfiles.rst
+   SeaIce.rst
    Time_Stepping.rst
    VerticalSCoord.rst
    Visualization.rst

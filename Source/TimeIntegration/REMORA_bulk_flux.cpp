@@ -1,4 +1,5 @@
 #include <REMORA.H>
+#include <REMORA_IceBulkFlux.H>
 
 using namespace amrex;
 
@@ -47,6 +48,14 @@ REMORA::bulk_fluxes (int lev, MultiFab* mf_cons, MultiFab* mf_uwind, MultiFab* m
     MultiFab mf_Taux(ba, dm, 1, IntVect(NGROW,NGROW,0));
     MultiFab mf_Tauy(ba, dm, 1, IntVect(NGROW,NGROW,0));
 
+    // Air-ice stress at rho points (ROMS Taux_Ice/Tauy_Ice in bulk_flux.F)
+    MultiFab mf_Taux_ice, mf_Tauy_ice;
+    if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+        const BoxArray& ba2d = vec_ice_f[lev]->boxArray();
+        mf_Taux_ice.define(ba2d, dm, 1, IntVect(NGROW,NGROW,0));
+        mf_Tauy_ice.define(ba2d, dm, 1, IntVect(NGROW,NGROW,0));
+    }
+
     // temps: Taux, Tauy,
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
@@ -67,6 +76,27 @@ REMORA::bulk_fluxes (int lev, MultiFab* mf_cons, MultiFab* mf_uwind, MultiFab* m
         Array4<Real> const& lrflx = mf_lrflx->array(mfi);
         Array4<Real> const& lhflx = mf_lhflx->array(mfi);
         Array4<Real> const& shflx = mf_shflx->array(mfi);
+
+        const bool l_sea_ice = REMORASeaIce::has_sea_ice(sea_ice_model);
+        Array4<Real const> Si_old;
+        Array4<Real>       Fi_arr, Qnet_ao_arr, Qnet_ai_arr, snow_arr, srflx_ice_arr;
+        if (l_sea_ice) {
+            Si_old        = vec_ice_s_new[lev]->const_array(mfi);  // state entering the step
+            Fi_arr        = vec_ice_f[lev]->array(mfi);
+            Qnet_ao_arr   = vec_Qnet_ao[lev]->array(mfi);
+            Qnet_ai_arr   = vec_Qnet_ai[lev]->array(mfi);
+            snow_arr      = vec_snow[lev]->array(mfi);
+            srflx_ice_arr = vec_srflx_ice[lev]->array(mfi);
+        }
+        Array4<Real> Taux_ice_arr, Tauy_ice_arr;
+        if (l_sea_ice) {
+            Taux_ice_arr = mf_Taux_ice.array(mfi);
+            Tauy_ice_arr = mf_Tauy_ice.array(mfi);
+        }
+        const auto ice_p        = sea_ice_params;
+        const bool l_albedo_fix = sea_ice_params.albedo_melt_fix;
+        const Real l_blk_ZT     = solverChoice.blk_ZT;
+        const Real l_HscaleW    = solverChoice.rho0 * Cp;   // C m/s -> W/m2
         Array4<Real> const& evap  = mf_evap->array(mfi);
         Array4<Real> const& Taux = mf_Taux.array(mfi);
         Array4<Real> const& Tauy = mf_Tauy.array(mfi);
@@ -372,6 +402,13 @@ REMORA::bulk_fluxes (int lev, MultiFab* mf_cons, MultiFab* mf_uwind, MultiFab* m
 
             Real Hl=-Hlv*rhoAir*Wstar*Qstar;
 
+            // With sea ice, snowfall on the ocean (negative rain) changes the latent heat by
+            // its heat of fusion (ROMS bulk_flux.F, ICE_BULK_FLUXES). The sign is ROMS's: it
+            // reduces the heat the ocean loses.
+            if (l_sea_ice && rain(i,j,0) < Real(0.0)) {
+                Hl += REMORASeaIce::Thermo::hfus * rain(i,j,0);
+            }
+
             // Compute Webb correction (Webb effect) to latent heat flux, Hlw.
             Real upvel=Real(-1.61)*Wstar*Qstar-
                         (one+Real(1.61)*Q)*Wstar*Tstar/TairK;
@@ -424,11 +461,96 @@ REMORA::bulk_fluxes (int lev, MultiFab* mf_cons, MultiFab* mf_uwind, MultiFab* m
             // Note: srflx from NetCDF is in W/m^2, convert to degC m/s by multiplying by Hscale2
             stflux(i,j,0,Temp_comp)=(srflux*Hscale2 + lrflx(i,j,0) + lhflx(i,j,0) + shflx(i,j,0)) * mskr(i,j,0);
             evap(i,j,0) = LHeat/(Hlv+eps) * mskr(i,j,0);
+            // Only the open-water fraction evaporates (ROMS bulk_flux.F, ICE_BULK_FLUXES)
+            if (l_sea_ice) {
+                evap(i,j,0) *= (one - Si_old(i,j,0,REMORASeaIce::IceS::Aice));
+            }
             if (use_EminusP_from_input) {
                 // Use prescribed E-P directly
                 stflux(i,j,0,Salt_comp) = mskr(i,j,0) * EminusP(i,j,0);
             } else {
                 stflux(i,j,0,Salt_comp) = (one/rhow)*(evap(i,j,0)-rain(i,j,0)) * mskr(i,j,0);
+            }
+
+            // ----------------------------------------------------------------
+            // Sea ice. ROMS bulk_flux.F, the ICE_BULK_FLUXES blocks.
+            // ----------------------------------------------------------------
+            if (l_sea_ice) {
+                const Real Aice = Si_old(i,j,0,REMORASeaIce::IceS::Aice);
+                const Real Hice = Si_old(i,j,0,REMORASeaIce::IceS::Hice);
+                const Real Hsno = Si_old(i,j,0,REMORASeaIce::IceS::Hsno);
+                const Real Hmel = Si_old(i,j,0,REMORASeaIce::IceS::Hmel);
+                const Real Isst = Fi_arr(i,j,0,REMORASeaIce::IceF::Isst);
+
+                // Albedo over the ice/snow surface (ROMS ice_albedo.F).
+                const Real alb_i = ice_p.albedo_ec92
+                    ? REMORASeaIce::ice_albedo_ec92(Aice, Hice, Hsno, Hmel, ice_p)
+                    : REMORASeaIce::ice_albedo(Aice, Hsno, Isst, ice_p, l_albedo_fix);
+
+                // The air-ice flux and the two coefficients ice_mk.h uses to
+                // solve for the ice surface temperature implicitly.
+                REMORASeaIce::IceAirFluxIn ai;
+                ai.rhoAir = rhoAir;   ai.delW = delW;      ai.Q    = Q;
+                ai.Qsea   = Qsea;     ai.TairC = TairC;    ai.Hlv  = Hlv;
+                ai.Pair   = PairM;    ai.rain = rain(i,j,0);
+                // The ice takes its longwave by the route the ocean's just took
+                ai.lw_mode = (have_external_longwave && longwave_is_net)   ? 2
+                           : (have_external_longwave && use_longwave_down) ? 1 : 0;
+                ai.lw_in   = (ai.lw_mode == 0) ? zero : longwave_down_arr(i,j,0);
+                ai.cloud   = cloud;
+                ai.srflx_ice = srflux;          // net shortwave at the surface
+                ai.albedo_ice = alb_i;
+                ai.wet_bulb = wet_bulb;
+                ai.temp_top = cons(i,j,N,Temp_comp);
+                ai.Aice = Aice;  ai.Hmel = Hmel;  ai.Isst = Isst;
+                ai.blk_ZT = l_blk_ZT;
+
+                REMORASeaIce::IceAirFluxOut ao;
+                REMORASeaIce::ice_air_flux(ai, ice_p, ao);
+
+                Qnet_ai_arr(i,j,0) = ao.Qai      * mskr(i,j,0);
+                Fi_arr(i,j,0,REMORASeaIce::IceF::Qcon) = ao.Coef_Ice * mskr(i,j,0);
+                Fi_arr(i,j,0,REMORASeaIce::IceF::Qrhs) = ao.RHS_Ice  * mskr(i,j,0);
+
+                // Shortwave reaching the water, averaged over the cell:
+                // open water sees all of it, the ice-covered fraction sees
+                // what survives the ice and snow. ROMS's optical depth is
+                // 5*h_i up to 0.1 m and 0.1*(5 + (h_i - 0.1)) above, plus
+                // 20*h_s for snow.
+                // This routine's own eps, 1e-20 as in bulk_flux.F, not the 1e-4 of ice_mk.h
+                const Real cff1 = Real(1.0) / (Aice + eps);
+                const Real ice_thick  = Hice * cff1;
+                const Real snow_thick = Hsno * cff1;
+                Real tau = (ice_thick <= Real(0.1))
+                         ? ice_thick * Real(5.0)
+                         : Real(0.1) * (Real(5.0) + (ice_thick - Real(0.1)));
+                tau += snow_thick * Real(20.0);
+                srflx_ice_arr(i,j,0) = ((Real(1.0) - Aice) * srflux
+                                        + Aice * srflux * std::exp(-tau))
+                                     * mskr(i,j,0);
+
+                // Qnet_ao, positive out of the ocean. ROMS bulk_flux.F forms
+                // it from stflux(itemp) after srflx has been attenuated by the
+                // ice cover, so the attenuated shortwave is the default.
+                const Real srflux_ao = ice_p.qnet_ao_open_water_sw
+                                     ? srflux : srflx_ice_arr(i,j,0);
+                const Real net_ao_kin = srflux_ao * Hscale2
+                                      + lrflx(i,j,0) + lhflx(i,j,0) + shflx(i,j,0);
+                Qnet_ao_arr(i,j,0) = -net_ao_kin * l_HscaleW * mskr(i,j,0);
+
+                // Air-ice stress (ROMS bulk_flux.F): Taux_Ice = rhoAir*Cd_ai*Uwind*Wspeed.
+                // ROMS's Wspeed, SQRT(Wmag^2+Wgus^2) after the COARE iteration, is
+                // delW here. Cd_ai is the constant air-ice drag of ice.in, not the
+                // COARE coefficient.
+                const Real cff_ai = rhoAir * ice_p.Cd_ai * delW;
+                Taux_ice_arr(i,j,0) = cff_ai * uwind(i,j,0) * mskr(i,j,0);
+                Tauy_ice_arr(i,j,0) = cff_ai * vwind(i,j,0) * mskr(i,j,0);
+
+                // Snowfall. ROMS encodes frozen precipitation as rain < 0.
+                snow_arr(i,j,0) = (rain(i,j,0) >= Real(0.0))
+                                ? Real(0.0)
+                                : (std::abs(rain(i,j,0)) / ice_p.SnowDryRho);
+                snow_arr(i,j,0) *= mskr(i,j,0);
             }
         });
     }
@@ -455,5 +577,29 @@ REMORA::bulk_fluxes (int lev, MultiFab* mf_cons, MultiFab* mf_uwind, MultiFab* m
         ParallelFor(makeSlab(vbx,2,0), [=] AMREX_GPU_DEVICE (int i, int j, int ) {
             svstr(i,j,0) = cff_rho*(Tauy(i,j-1,0) + Tauy(i,j,0)) * mskv(i,j,0);
         });
+
+        // ROMS bulk_flux.F keeps the open-water stress as sustr_ao/svstr_ao,
+        // because ice_vbc.F replaces sustr/svstr with a blend of it and the
+        // ice-water drag. The air-ice stress is stored differently: sustr_ai
+        // and svstr_ai hold the cell value Taux_Ice(i,j), in N/m2, neither
+        // averaged to the face nor divided by rho0. ice_vbc.F averages the
+        // two cells on either side of the face itself and divides by the ice
+        // density.
+        if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+            Array4<Real> const& su_ao = vec_sustr_ao[lev]->array(mfi);
+            Array4<Real> const& sv_ao = vec_svstr_ao[lev]->array(mfi);
+            Array4<Real> const& su_ai = vec_sustr_ai[lev]->array(mfi);
+            Array4<Real> const& sv_ai = vec_svstr_ai[lev]->array(mfi);
+            Array4<Real const> const& tx_i = mf_Taux_ice.const_array(mfi);
+            Array4<Real const> const& ty_i = mf_Tauy_ice.const_array(mfi);
+            ParallelFor(makeSlab(ubx,2,0), [=] AMREX_GPU_DEVICE (int i, int j, int ) {
+                su_ao(i,j,0) = sustr(i,j,0);
+                su_ai(i,j,0) = tx_i(i,j,0);
+            });
+            ParallelFor(makeSlab(vbx,2,0), [=] AMREX_GPU_DEVICE (int i, int j, int ) {
+                sv_ao(i,j,0) = svstr(i,j,0);
+                sv_ai(i,j,0) = ty_i(i,j,0);
+            });
+        }
     }
 }

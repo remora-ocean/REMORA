@@ -1,4 +1,5 @@
 #include <REMORA.H>
+#include <REMORA_SeaIce.H>
 #include "AMReX_Interp_3D_C.H"
 #include "AMReX_PlotFileUtil.H"
 
@@ -165,6 +166,20 @@ REMORA::set2DPlotVariables (const std::string& pp_plot_var_names_2d)
         plot_var_names_2d.clear();
     }
 
+    // "seaice" stands for every 2D sea-ice field, so a deck need not list them.
+    if (REMORASeaIce::has_sea_ice(sea_ice_model) && containerHasElement(plot_var_names_2d, "seaice")) {
+        plot_var_names_2d.erase(std::remove(plot_var_names_2d.begin(),
+                                            plot_var_names_2d.end(), std::string("seaice")),
+                                plot_var_names_2d.end());
+        int n_ice = 0;
+        const auto* ice_vars = REMORASeaIce::ice_plot_vars(n_ice);
+        for (int i = 0; i < n_ice; ++i) {
+            if (!containerHasElement(plot_var_names_2d, std::string(ice_vars[i].name))) {
+                plot_var_names_2d.push_back(ice_vars[i].name);
+            }
+        }
+    }
+
     // If horizontal mixing is scaled_to_grid, automatically output the spatially
     // varying coefficients used by the run as 2D fields.
     if (solverChoice.horiz_mixing_type == HorizMixingType::scaled_to_grid) {
@@ -218,6 +233,17 @@ REMORA::set2DPlotVariables (const std::string& pp_plot_var_names_2d)
     if (containerHasElement(plot_var_names_2d, "lhflux")) tmp_plot_names.push_back("lhflux");
     if (containerHasElement(plot_var_names_2d, "srflux")) tmp_plot_names.push_back("srflux");
     if (containerHasElement(plot_var_names_2d, "shflux")) tmp_plot_names.push_back("shflux");
+
+    // Sea-ice fields
+    if (REMORASeaIce::has_sea_ice(sea_ice_model)) {
+        int n_icevar = 0;
+        const auto* icevars = REMORASeaIce::ice_plot_vars(n_icevar);
+        for (int k = 0; k < n_icevar; ++k) {
+            if (containerHasElement(plot_var_names_2d, icevars[k].name)) {
+                tmp_plot_names.push_back(icevars[k].name);
+            }
+        }
+    }
 
     if (containerHasElement(plot_var_names_2d, "mask_rho")) tmp_plot_names.push_back("mask_rho");
     if (containerHasElement(plot_var_names_2d, "mask_u")) tmp_plot_names.push_back("mask_u");
